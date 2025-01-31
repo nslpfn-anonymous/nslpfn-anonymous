@@ -1,4 +1,4 @@
-**Anonymized Research Repository of Bayesian Neural Scaling Law Extrapolation with Prior-Fitted Networks**
+**Anonymized Research Repository of Bayesian Neural Scaling Law Extrapolation with Prior-Data Fitted Networks**
 
 **All experiments were conducted on:**
 - OS: Ubuntu 18.04
