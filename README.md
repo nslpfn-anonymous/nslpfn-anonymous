@@ -1,16 +1,13 @@
-## Hi there 👋
+**Anonymized Research Repository of Bayesian Neural Scaling Law Extrapolation with Prior-Fitted Networks**
 
-<!--
-**nslpfn-anonymous/nslpfn-anonymous** is a ✨ _special_ ✨ repository because its `README.md` (this file) appears on your GitHub profile.
+**All experiments were conducted on:**
+- OS: Ubuntu 18.04
+- Python: 3.7.16
+- CUDA: 11.3
+- torch: 1.12.0
+- numpy: 1.21.5
 
-Here are some ideas to get you started:
-
-- 🔭 I’m currently working on ...
-- 🌱 I’m currently learning ...
-- 👯 I’m looking to collaborate on ...
-- 🤔 I’m looking for help with ...
-- 💬 Ask me about ...
-- 📫 How to reach me: ...
-- 😄 Pronouns: ...
-- ⚡ Fun fact: ...
--->
+**Execution Instructions**
+1. init_criterion.py: Initialize criterion.
+2. main.py: Train model.
+3. inference.py: Test model. You can use our pretrained checkpoint in pretrained_surrogate_results/default, after unzip model.zip.
