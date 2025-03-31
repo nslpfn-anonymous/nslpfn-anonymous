@@ -1,5 +1,3 @@
-Mean over 3 runs for the baselines and our method. * indicates that a few trials failed due to overflow error, which were excluded from the calculation. The best results are in bold, and the second-best results are underlined.
-
 | Method | Bayes. | IC RMSLE (↓) | IC LL (↑) | IC MSCE (↓) | NLP+Nano RMSLE (↓) | NLP+Nano LL (↑) | NLP+Nano MSCE (↓) | ColPret RMSLE (↓) | ColPret LL (↑) | ColPret MSCE (↓) | DD RMSLE (↓) | DD LL (↑) | DD MSCE (↓) |
 |:------:|:------:|:------------:|:---------:|:----------:|:-------------------:|:----------------:|:----------------:|:------------------:|:---------------:|:---------------:|:-------------:|:---------:|:----------:|
 | $\mathcal{M}_1$ | ❌ | 0.1046 | - | - | 0.0593 | - | - | 0.0732 | - | - | 0.1140 | - | - |
