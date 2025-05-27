@@ -4,19 +4,22 @@ import argparse
 import numpy as np
 import torch
 
-from pfn.bar_distribution import get_bucket_limits, FullSupportBarDistribution
-from pfn.transformer import TransformerModel
+from lcpfn.bar_distribution import get_bucket_limits, FullSupportBarDistribution
+from lcpfn.transformer import TransformerModel
+# from lcpfn.transformer_noupward import TransformerModel
 from data.get_test_data import *
 import matplotlib
 matplotlib.use('Agg') 
 import matplotlib.pyplot as plt
 
+from typing import List, Dict, Tuple, Optional, Union
+
 def bardist_calibration(
     bar_dist,              # BarDistribution instance
     logits,    # Shape: (N, num_bars) - Model output logits
     y_true,    # Shape: (N,) - Ground truth values
-    confidence_levels=None,
-    ):
+    confidence_levels: Optional[List[float]] = None
+) -> Dict:
     """
     Compute Mean squareolute Calibration Error (mce) for BarDistribution.
     
@@ -51,6 +54,9 @@ def bardist_calibration(
     if len(y_true.shape) == 2:  # (N, 1)
         y_true = y_true.squeeze(dim=1)  # -> (N,)
     
+    # Number of data points
+    n_data = y_true.shape[0]
+    
     # Initialize results
     observed_coverages = []
     interval_widths = []
@@ -76,6 +82,13 @@ def bardist_calibration(
         observed_coverages.append(coverage)
         interval_widths.append(width)
 
+        # print(lower_bounds)
+        # print("Lower bounds:", lower_bounds[:5])  # First 5 values
+        # print("Upper bounds:", upper_bounds[:5])
+        # print("Y true:", y_true[:5])
+        # print("Within interval:", within_interval[:5])
+        # print("Coverage:", coverage)
+    
     # Calculate miscalibration metrics
     square_miscalibrations = [np.square(observed - expected) 
                           for observed, expected in zip(observed_coverages, confidence_levels)]
@@ -86,11 +99,12 @@ def bardist_calibration(
         'observed_coverages': observed_coverages,
         'interval_widths': interval_widths,
         'square_miscalibrations': square_miscalibrations,
-        'mean_square_miscalibration': np.mean(square_miscalibrations),  # This is the MSCE
+        'mean_square_miscalibration': np.mean(square_miscalibrations),  # This is the mce
         'max_square_miscalibration': max(square_miscalibrations)
     }
-
+    
     return metrics
+
 
 def predict_quantiles(logits, qs, criterion):
     return torch.stack([criterion.icdf(logits.squeeze(), q) for q in qs], dim=1)
@@ -99,7 +113,7 @@ def get_metric(device, model, criterion, xc, yc, xt, yt, y_normalize=True, epsil
     xc, yc, xt, yt = xc.unsqueeze(0).to(device), yc.unsqueeze(0).to(device), xt.unsqueeze(0).to(device), yt.unsqueeze(0).to(device)
     
     if y_normalize: # Normalize y, since DD and nano is not normalized unlike bench
-        y_max = yc.max().item()
+        y_max = max(yc.max().item(), yt.max().item())
         yc, yt = yc / y_max, yt / y_max
 
     # apply min-max normalization to [epsilon, 1]
@@ -109,7 +123,7 @@ def get_metric(device, model, criterion, xc, yc, xt, yt, y_normalize=True, epsil
 
     # forward
     yt_pred = model(xc, yc, xt)
-    msce = bardist_calibration(criterion, yt_pred.squeeze(0), yt.squeeze(0))['mean_square_miscalibration']
+    mce = bardist_calibration(criterion, yt_pred.squeeze(0), yt.squeeze(0))['mean_square_miscalibration']
     negative_log_prob = criterion(yt_pred, yt)
     loss = negative_log_prob.sum().item()
     yt_pred = criterion.median(yt_pred)
@@ -118,7 +132,7 @@ def get_metric(device, model, criterion, xc, yc, xt, yt, y_normalize=True, epsil
     rmsle = torch.sqrt(((torch.log(yt_pred) - torch.log(yt)) ** 2).sum() / yt.numel()).item()
     log_likelihood = -(negative_log_prob.mean().item())
             
-    return loss, rmsle, log_likelihood, msce
+    return loss, rmsle, log_likelihood, mce
 
 def get_pred(device, model, criterion, xc, yc, xt, yt, pred_all=False, y_normalize=True, epsilon=1e-2):
     xc, yc, xt, yt = xc.unsqueeze(0).to(device), yc.unsqueeze(0).to(device), xt.unsqueeze(0).to(device), yt.unsqueeze(0).to(device)
@@ -161,40 +175,12 @@ def plot_and_log_bench(logger, device, model, criterion, data, save_dir, cutoff=
     os.makedirs(os.path.join(save_dir, domain), exist_ok=True)
     log = []
     for i, (key, xc, yc, xt, yt) in enumerate(data):
-        plt.figure()
         str_key = '_'.join(key).replace('/','-')
 
-        loss, rmsle, log_likelihood, msce = get_metric(device, model, criterion, xc, yc, xt, yt, y_normalize=False)
+        loss, rmsle, log_likelihood, mce = get_metric(device, model, criterion, xc, yc, xt, yt, y_normalize=False)
         yt_pred, predictions = get_pred(device, model, criterion, xc, yc, xt, yt, pred_all=pred_all, y_normalize=False)
 
-        # plot data
-        plt.plot(xc, yc, color='black', label="context", marker='o')
-        plt.scatter(xt, yt, color=[0.0, 0.925, 0.0], label="target", marker='o')
-        
-        # plot PFN
-        if predictions is not None:
-            plt.plot(xt if not pred_all else torch.cat([xc, xt], dim=0), yt_pred, "blue", label="NSL-PFN")
-            plt.fill_between(
-                    xt if not pred_all else torch.cat([xc, xt], dim=0), predictions[:, 0], predictions[:, 2], color="blue", alpha=0.2, label="CI of 90%"
-            )
-        else:
-            plt.scatter(xt if not pred_all else torch.cat([xc, xt], dim=0), yt_pred, color="blue", label="NSL-PFN")
-        
-        # plot cutoff
-        plt.vlines(max(xc), 0, 1, linewidth=0.5, color="k", label="cutoff", linestyle='--')
-
-        plt.xscale("log")
-        plt.ylim(0, 1.1)
-        plt.xlabel("Training Data Size")
-        plt.ylabel("Test Error Rate")
-
-        plt.title(f"{key}\nrmsle:{rmsle:.4f} / log-likelihood:{log_likelihood:.4f}")
-        plt.legend()
-        figure_save_path = os.path.join(save_dir, domain, f"{str_key}.png" if cutoff == -1 else f"{str_key}_{cutoff}.png")
-        plt.savefig(figure_save_path)
-        plt.close()
-
-        log.append((*key, loss, rmsle, log_likelihood, msce))
+        log.append((*key, loss, rmsle, log_likelihood, mce))
 
     # get average and std of rmsle and log-likelihood
     avg_loss = np.mean([l[3] for l in log])
@@ -203,16 +189,19 @@ def plot_and_log_bench(logger, device, model, criterion, data, save_dir, cutoff=
     std_rmsle = np.std([l[4] for l in log])
     avg_log_likelihood = np.mean([l[5] for l in log])
     std_log_likelihood = np.std([l[5] for l in log])
-    avg_msce = np.mean([l[6] for l in log])
-    std_msce = np.std([l[6] for l in log])
-    log.append((domain, '', 'AVG', f'{avg_loss:.4f}+-{std_loss:.4f}', f'{avg_rmsle:.4f}+-{std_rmsle:.4f}', f'{avg_log_likelihood:.4f}+-{std_log_likelihood:.4f}', f'{avg_msce:.4f}+-{std_msce:.4f}'))
-    df = pd.DataFrame(log, columns=['domain', 'task', 'model', 'loss', 'rmsle', 'log-likelihood', 'msce'])
+    avg_mce = np.mean([l[6] for l in log])
+    std_mce = np.std([l[6] for l in log])
+    log.append((domain, '', 'AVG', f'{avg_loss:.4f}+-{std_loss:.4f}', f'{avg_rmsle:.4f}+-{std_rmsle:.4f}', f'{avg_log_likelihood:.4f}+-{std_log_likelihood:.4f}', f'{avg_mce:.4f}+-{std_mce:.4f}'))
+    df = pd.DataFrame(log, columns=['domain', 'task', 'model', 'loss', 'rmsle', 'log-likelihood', 'mce'])
+
+    # # save log
+    # df.to_csv(os.path.join(save_dir, f"{domain}.csv" if cutoff == -1 else f"{domain}_{cutoff}.csv"), index=False)
 
     # print log
-    print(f"{domain} AVG Loss: {avg_loss:.4f} +/- {std_loss:.4f}")
-    print(f"{domain} AVG RMSLE: {avg_rmsle:.4f} +/- {std_rmsle:.4f}")
-    print(f"{domain} AVG Log-likelihood: {avg_log_likelihood:.4f} +/- {std_log_likelihood:.4f}")
-    print(f"{domain} AVG MSCE: {avg_msce:.4f} +/- {std_msce:.4f}")
+    # print(f"{domain} AVG Loss: {avg_loss:.4f} +/- {std_loss:.4f}")
+    # print(f"{domain} AVG RMSLE: {avg_rmsle:.4f} +/- {std_rmsle:.4f}")
+    # print(f"{domain} AVG Log-likelihood: {avg_log_likelihood:.4f} +/- {std_log_likelihood:.4f}")
+    print(f"{domain} AVG mce: {avg_mce:.4f} +/- {std_mce:.4f}")
     print()
 
     # log to wandb
@@ -220,7 +209,7 @@ def plot_and_log_bench(logger, device, model, criterion, data, save_dir, cutoff=
         logger.meter(domain, 'loss', avg_loss)
         logger.meter(domain, 'rmsle', avg_rmsle)
         logger.meter(domain, 'log-likelihood', avg_log_likelihood)
-        logger.meter(domain, 'msce', avg_msce)
+        logger.meter(domain, 'mce', avg_mce)
 
     return df
 
@@ -229,42 +218,11 @@ def plot_and_log_DD(logger, device, model, criterion, data, labels, save_dir, cu
     os.makedirs(os.path.join(save_dir, domain), exist_ok=True)
     log = []
     for i, (key, xc, yc, xt, yt) in enumerate(data):
-        plt.figure()
         task = key[1]
 
-        loss, rmsle, log_likelihood, msce = get_metric(device, model, criterion, xc, yc, xt, yt, y_normalize=True)
-        yt_pred, predictions = get_pred(device, model, criterion, xc, yc, xt, yt, pred_all=pred_all, y_normalize=True)
+        loss, rmsle, log_likelihood, mce = get_metric(device, model, criterion, xc, yc, xt, yt, y_normalize=True)
 
-        # plot data
-        plt.plot(xc, yc, color='black', label="context", marker='o')
-        plt.scatter(xt, yt, color=[0.0, 0.925, 0.0], label="target", marker='o')
-        
-        # plot PFN
-        if predictions is not None:
-            plt.plot(xt if not pred_all else torch.cat([xc, xt], dim=0), yt_pred, "blue", label="NSL-PFN")
-            plt.fill_between(
-                    xt if not pred_all else torch.cat([xc, xt], dim=0), predictions[:, 0], predictions[:, 2], color="blue", alpha=0.2, label="CI of 90%"
-            )
-        else:
-            plt.scatter(xt if not pred_all else torch.cat([xc, xt], dim=0), yt_pred, color="blue", label="NSL-PFN")
-        
-        # plot cutoff
-        plt.vlines(max(xc), 0, 1, linewidth=0.5, color="k", label="cutoff", linestyle='--')
-
-        x_min, x_max, y_min, y_max = min(xc.min().item(), xt.min().item()), max(xc.max().item(), xt.max().item()), min(yc.min().item(), yt.min().item()), max(yc.max().item(), yt.max().item())
-        plt.xlim(x_min*.865,x_max*1.05)
-        plt.ylim(y_min*.9, y_max*1.05)
-        x_label, y_label = labels[task]
-        plt.xlabel(x_label)
-        plt.ylabel(y_label)
-
-        plt.title(f"{key}\nrmsle:{rmsle:.4f} / log-likelihood:{log_likelihood:.4f}")
-        plt.legend()
-        figure_save_path = os.path.join(save_dir, domain, f"{task}.png" if cutoff == -1 else f"{task}_{cutoff}.png")
-        plt.savefig(figure_save_path)
-        plt.close()
-
-        log.append((*key, loss, rmsle, log_likelihood, msce))
+        log.append((*key, loss, rmsle, log_likelihood, mce))
 
     # get average and std of rmsle and log-likelihood
     avg_loss = np.mean([l[3] for l in log])
@@ -273,16 +231,19 @@ def plot_and_log_DD(logger, device, model, criterion, data, labels, save_dir, cu
     std_rmsle = np.std([l[4] for l in log])
     avg_log_likelihood = np.mean([l[5] for l in log])
     std_log_likelihood = np.std([l[5] for l in log])
-    avg_msce = np.mean([l[6] for l in log])
-    std_msce = np.std([l[6] for l in log])
-    log.append((domain, '', 'AVG', f'{avg_loss:.4f}+-{std_loss:.4f}', f'{avg_rmsle:.4f}+-{std_rmsle:.4f}', f'{avg_log_likelihood:.4f}+-{std_log_likelihood:.4f}', f'{avg_msce:.4f}+-{std_msce:.4f}'))
-    df = pd.DataFrame(log, columns=['domain', 'task', 'model', 'loss', 'rmsle', 'log-likelihood', 'msce'])
+    avg_mce = np.mean([l[6] for l in log])
+    std_mce = np.std([l[6] for l in log])
+    log.append((domain, '', 'AVG', f'{avg_loss:.4f}+-{std_loss:.4f}', f'{avg_rmsle:.4f}+-{std_rmsle:.4f}', f'{avg_log_likelihood:.4f}+-{std_log_likelihood:.4f}', f'{avg_mce:.4f}+-{std_mce:.4f}'))
+    df = pd.DataFrame(log, columns=['domain', 'task', 'model', 'loss', 'rmsle', 'log-likelihood', 'mce'])
+
+    # # save log
+    # df.to_csv(os.path.join(save_dir, f"{domain}.csv" if cutoff == -1 else f"{domain}_{cutoff}.csv"), index=False)
 
     # print log
-    print(f"{domain} AVG Loss: {avg_loss:.4f} +/- {std_loss:.4f}")
-    print(f"{domain} AVG RMSLE: {avg_rmsle:.4f} +/- {std_rmsle:.4f}")
-    print(f"{domain} AVG Log-likelihood: {avg_log_likelihood:.4f} +/- {std_log_likelihood:.4f}")
-    print(f"{domain} AVG MSCE: {avg_msce:.4f} +/- {std_msce:.4f}")
+    # print(f"{domain} AVG Loss: {avg_loss:.4f} +/- {std_loss:.4f}")
+    # print(f"{domain} AVG RMSLE: {avg_rmsle:.4f} +/- {std_rmsle:.4f}")
+    # print(f"{domain} AVG Log-likelihood: {avg_log_likelihood:.4f} +/- {std_log_likelihood:.4f}")
+    print(f"{domain} AVG mce: {avg_mce:.4f} +/- {std_mce:.4f}")
     print()
 
     # log to wandb
@@ -290,51 +251,19 @@ def plot_and_log_DD(logger, device, model, criterion, data, labels, save_dir, cu
         logger.meter(domain, 'loss', avg_loss)
         logger.meter(domain, 'rmsle', avg_rmsle)
         logger.meter(domain, 'log-likelihood', avg_log_likelihood)
-        logger.meter(domain, 'msce', avg_msce)
+        logger.meter(domain, 'mce', avg_mce)
 
     return df
 
-def plot_and_log_nano(logger, device, model, criterion, data, save_dir, cutoff=-1, pred_all=False):
+def plot_and_nano_bench(logger, device, model, criterion, data, save_dir, cutoff=-1, pred_all=False):
     domain = data[0][0][0]
     os.makedirs(os.path.join(save_dir, domain), exist_ok=True)
     log = []
     for i, (key, xc, yc, xt, yt) in enumerate(data):
-        plt.figure()
         task = key[1]
 
-        loss, rmsle, log_likelihood, msce = get_metric(device, model, criterion, xc, yc, xt, yt, y_normalize=True)
-        yt_pred, predictions = get_pred(device, model, criterion, xc, yc, xt, yt, pred_all=pred_all, y_normalize=True)
-
-        # plot data
-        plt.plot(xc, yc, color='black', label="context", marker='o')
-        plt.scatter(xt, yt, color=[0.0, 0.925, 0.0], label="target", marker='o')
-        
-        # plot PFN
-        if predictions is not None:
-            plt.plot(xt if not pred_all else torch.cat([xc, xt], dim=0), yt_pred, "blue", label="NSL-PFN")
-            plt.fill_between(
-                    xt if not pred_all else torch.cat([xc, xt], dim=0), predictions[:, 0], predictions[:, 2], color="blue", alpha=0.2, label="CI of 90%"
-            )
-        else:
-            plt.scatter(xt if not pred_all else torch.cat([xc, xt], dim=0), yt_pred, color="blue", label="NSL-PFN")
-        
-        # plot cutoff
-        plt.vlines(max(xc), 0, 1, linewidth=0.5, color="k", label="cutoff", linestyle='--')
-
-        x_min, x_max, y_min, y_max = min(xc.min().item(), xt.min().item()), max(xc.max().item(), xt.max().item()), min(yc.min().item(), yt.min().item()), max(yc.max().item(), yt.max().item())
-        plt.xscale("log")
-        plt.xlim(x_min*.865,x_max*1.05)
-        plt.ylim(y_min*.9, y_max*1.05)
-        plt.xlabel('n_embed')
-        plt.ylabel('val_loss')
-
-        plt.title(f"{key}\nrmsle:{rmsle:.4f} / log-likelihood:{log_likelihood:.4f}")
-        plt.legend()
-        figure_save_path = os.path.join(save_dir, domain, f"{task}.png" if cutoff == -1 else f"{task}_{cutoff}.png")
-        plt.savefig(figure_save_path)
-        plt.close()
-
-        log.append((*key, loss, rmsle, log_likelihood, msce))
+        loss, rmsle, log_likelihood, mce = get_metric(device, model, criterion, xc, yc, xt, yt, y_normalize=True)
+        log.append((*key, loss, rmsle, log_likelihood, mce))
 
     # get average and std of rmsle and log-likelihood
     avg_loss = np.mean([l[3] for l in log])
@@ -343,16 +272,19 @@ def plot_and_log_nano(logger, device, model, criterion, data, save_dir, cutoff=-
     std_rmsle = np.std([l[4] for l in log])
     avg_log_likelihood = np.mean([l[5] for l in log])
     std_log_likelihood = np.std([l[5] for l in log])
-    avg_msce = np.mean([l[6] for l in log])
-    std_msce = np.std([l[6] for l in log])
-    log.append((domain, '', 'AVG', f'{avg_loss:.4f}+-{std_loss:.4f}', f'{avg_rmsle:.4f}+-{std_rmsle:.4f}', f'{avg_log_likelihood:.4f}+-{std_log_likelihood:.4f}', f'{avg_msce:.4f}+-{std_msce:.4f}'))
-    df = pd.DataFrame(log, columns=['domain', 'task', 'model', 'loss', 'rmsle', 'log-likelihood', 'msce'])
+    avg_mce = np.mean([l[6] for l in log])
+    std_mce = np.std([l[6] for l in log])
+    log.append((domain, '', 'AVG', f'{avg_loss:.4f}+-{std_loss:.4f}', f'{avg_rmsle:.4f}+-{std_rmsle:.4f}', f'{avg_log_likelihood:.4f}+-{std_log_likelihood:.4f}', f'{avg_mce:.4f}+-{std_mce:.4f}'))
+    df = pd.DataFrame(log, columns=['domain', 'task', 'model', 'loss', 'rmsle', 'log-likelihood', 'mce'])
+
+    # # save log
+    # df.to_csv(os.path.join(save_dir, f"{domain}.csv" if cutoff == -1 else f"{domain}_{cutoff}.csv"), index=False)
 
     # print log
-    print(f"{domain} AVG Loss: {avg_loss:.4f} +/- {std_loss:.4f}")
-    print(f"{domain} AVG RMSLE: {avg_rmsle:.4f} +/- {std_rmsle:.4f}")
-    print(f"{domain} AVG Log-likelihood: {avg_log_likelihood:.4f} +/- {std_log_likelihood:.4f}")
-    print(f"{domain} AVG MSCE: {avg_msce:.4f} +/- {std_msce:.4f}")
+    # print(f"{domain} AVG Loss: {avg_loss:.4f} +/- {std_loss:.4f}")
+    # print(f"{domain} AVG RMSLE: {avg_rmsle:.4f} +/- {std_rmsle:.4f}")
+    # print(f"{domain} AVG Log-likelihood: {avg_log_likelihood:.4f} +/- {std_log_likelihood:.4f}")
+    print(f"{domain} AVG mce: {avg_mce:.4f} +/- {std_mce:.4f}")
     print()
 
     # log to wandb
@@ -360,7 +292,7 @@ def plot_and_log_nano(logger, device, model, criterion, data, save_dir, cutoff=-
         logger.meter(domain, 'loss', avg_loss)
         logger.meter(domain, 'rmsle', avg_rmsle)
         logger.meter(domain, 'log-likelihood', avg_log_likelihood)
-        logger.meter(domain, 'msce', avg_msce)
+        logger.meter(domain, 'mce', avg_mce)
 
     return df
 
@@ -369,42 +301,11 @@ def plot_and_log_colpret(logger, device, model, criterion, data, save_dir, cutof
     os.makedirs(os.path.join(save_dir, domain), exist_ok=True)
     log = []
     for i, (key, xc, yc, xt, yt) in enumerate(data):
-        plt.figure()
         model_name = key[2]
 
-        loss, rmsle, log_likelihood, msce = get_metric(device, model, criterion, xc, yc, xt, yt, y_normalize=True)
-        yt_pred, predictions = get_pred(device, model, criterion, xc, yc, xt, yt, pred_all=pred_all, y_normalize=True)
+        loss, rmsle, log_likelihood, mce = get_metric(device, model, criterion, xc, yc, xt, yt, y_normalize=True)
 
-        # plot data
-        plt.plot(xc, yc, color='black', label="context", marker='o')
-        plt.scatter(xt, yt, color=[0.0, 0.925, 0.0], label="target", marker='o')
-        
-        # plot PFN
-        if predictions is not None:
-            plt.plot(xt if not pred_all else torch.cat([xc, xt], dim=0), yt_pred, "blue", label="NSL-PFN")
-            plt.fill_between(
-                    xt if not pred_all else torch.cat([xc, xt], dim=0), predictions[:, 0], predictions[:, 2], color="blue", alpha=0.2, label="CI of 90%"
-            )
-        else:
-            plt.scatter(xt if not pred_all else torch.cat([xc, xt], dim=0), yt_pred, color="blue", label="NSL-PFN")
-        
-        # plot cutoff
-        plt.vlines(max(xc), 0, 1, linewidth=0.5, color="k", label="cutoff", linestyle='--')
-
-        x_min, x_max, y_min, y_max = min(xc.min().item(), xt.min().item()), max(xc.max().item(), xt.max().item()), min(yc.min().item(), yt.min().item()), max(yc.max().item(), yt.max().item())
-        # plt.xscale("log")
-        plt.xlim(x_min*.865,x_max*1.05)
-        plt.ylim(y_min*.9, y_max*1.05)
-        plt.xlabel('Training Data Size')
-        plt.ylabel('Loss')
-
-        plt.title(f"{key}\nrmsle:{rmsle:.4f} / log-likelihood:{log_likelihood:.4f}")
-        plt.legend()
-        figure_save_path = os.path.join(save_dir, domain, f"{model_name}.png" if cutoff == -1 else f"{model_name}_{cutoff}.png")
-        plt.savefig(figure_save_path)
-        plt.close()
-
-        log.append((*key, loss, rmsle, log_likelihood, msce))
+        log.append((*key, loss, rmsle, log_likelihood, mce))
 
     # get average and std of rmsle and log-likelihood
     avg_loss = np.mean([l[3] for l in log])
@@ -413,16 +314,16 @@ def plot_and_log_colpret(logger, device, model, criterion, data, save_dir, cutof
     std_rmsle = np.std([l[4] for l in log])
     avg_log_likelihood = np.mean([l[5] for l in log])
     std_log_likelihood = np.std([l[5] for l in log])
-    avg_msce = np.mean([l[6] for l in log])
-    std_msce = np.std([l[6] for l in log])
-    log.append((domain, '', 'AVG', f'{avg_loss:.4f}+-{std_loss:.4f}', f'{avg_rmsle:.4f}+-{std_rmsle:.4f}', f'{avg_log_likelihood:.4f}+-{std_log_likelihood:.4f}', f'{avg_msce:.4f}+-{std_msce:.4f}'))
-    df = pd.DataFrame(log, columns=['domain', 'task', 'model', 'loss', 'rmsle', 'log-likelihood', 'msce'])
+    avg_mce = np.mean([l[6] for l in log])
+    std_mce = np.std([l[6] for l in log])
+    log.append((domain, '', 'AVG', f'{avg_loss:.4f}+-{std_loss:.4f}', f'{avg_rmsle:.4f}+-{std_rmsle:.4f}', f'{avg_log_likelihood:.4f}+-{std_log_likelihood:.4f}', f'{avg_mce:.4f}+-{std_mce:.4f}'))
+    df = pd.DataFrame(log, columns=['domain', 'task', 'model', 'loss', 'rmsle', 'log-likelihood', 'mce'])
 
     # print log
-    print(f"{domain} AVG Loss: {avg_loss:.4f} +/- {std_loss:.4f}")
-    print(f"{domain} AVG RMSLE: {avg_rmsle:.4f} +/- {std_rmsle:.4f}")
-    print(f"{domain} AVG Log-likelihood: {avg_log_likelihood:.4f} +/- {std_log_likelihood:.4f}")
-    print(f"{domain} AVG MSCE: {avg_msce:.4f} +/- {std_msce:.4f}")
+    # print(f"{domain} AVG Loss: {avg_loss:.4f} +/- {std_loss:.4f}")
+    # print(f"{domain} AVG RMSLE: {avg_rmsle:.4f} +/- {std_rmsle:.4f}")
+    # print(f"{domain} AVG Log-likelihood: {avg_log_likelihood:.4f} +/- {std_log_likelihood:.4f}")
+    print(f"{domain} AVG mce: {avg_mce:.4f} +/- {std_mce:.4f}")
     print()
 
     # log to wandb
@@ -430,7 +331,7 @@ def plot_and_log_colpret(logger, device, model, criterion, data, save_dir, cutof
         logger.meter(domain, 'loss', avg_loss)
         logger.meter(domain, 'rmsle', avg_rmsle)
         logger.meter(domain, 'log-likelihood', avg_log_likelihood)
-        logger.meter(domain, 'msce', avg_msce)
+        logger.meter(domain, 'mce', avg_mce)
 
     return df
 
@@ -444,13 +345,13 @@ def test(logger, device, model, criterion, cutoff, data_dir, save_dir):
     nano_data = get_nano_data(data_dir, cutoff=cutoff)
     colpret_data = get_colpret_data(data_dir, cutoff=cutoff)
 
-    IC_df = plot_and_log_bench(logger, device, model, criterion, IC_data, save_dir, cutoff=cutoff, pred_all=True)
-    NMT_df = plot_and_log_bench(logger, device, model, criterion, NMT_data, save_dir, cutoff=cutoff, pred_all=True)
-    LM_df = plot_and_log_bench(logger, device, model, criterion, LM_data, save_dir, cutoff=cutoff, pred_all=True)
-    BB_df = plot_and_log_bench(logger, device, model, criterion, BB_data, save_dir, cutoff=cutoff, pred_all=True)
-    DD_df = plot_and_log_DD(logger, device, model, criterion, DD_data, DD_labels, save_dir, cutoff=cutoff, pred_all=True)
-    nano_df = plot_and_log_nano(logger, device, model, criterion, nano_data, save_dir, cutoff=cutoff, pred_all=True)
-    colpret_df = plot_and_log_colpret(logger, device, model, criterion, colpret_data, save_dir, cutoff=cutoff, pred_all=True)
+    IC_df = plot_and_log_bench(logger, device, model, criterion, IC_data, save_dir, cutoff=cutoff, pred_all=False)
+    NMT_df = plot_and_log_bench(logger, device, model, criterion, NMT_data, save_dir, cutoff=cutoff, pred_all=False)
+    LM_df = plot_and_log_bench(logger, device, model, criterion, LM_data, save_dir, cutoff=cutoff, pred_all=False)
+    BB_df = plot_and_log_bench(logger, device, model, criterion, BB_data, save_dir, cutoff=cutoff, pred_all=False)
+    DD_df = plot_and_log_DD(logger, device, model, criterion, DD_data, DD_labels, save_dir, cutoff=cutoff, pred_all=False)
+    nano_df = plot_and_nano_bench(logger, device, model, criterion, nano_data, save_dir, cutoff=cutoff, pred_all=False)
+    colpret_df = plot_and_log_colpret(logger, device, model, criterion, colpret_data, save_dir, cutoff=cutoff, pred_all=False)
 
     # merge df and save
     dataframes = [IC_df, BB_df, LM_df, NMT_df, DD_df, nano_df, colpret_df]
@@ -464,7 +365,7 @@ def test(logger, device, model, criterion, cutoff, data_dir, save_dir):
     merged_df = pd.concat([merged_df] + last_rows, ignore_index=True)  # Add last rows at the end
 
     # Save to a file
-    merged_df.to_csv(os.path.join(save_dir, "log.csv" if cutoff == -1 else f"log_cutoff{cutoff}.csv"), index=False)
+    merged_df.to_csv(os.path.join(save_dir, "CE.csv" if cutoff == -1 else f"CE_cutoff{cutoff}.csv"), index=False)
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Parameter Processing')
@@ -474,7 +375,8 @@ if __name__ == '__main__':
 
     # dir
     parser.add_argument('--data_dir', type=str, default="./data")
-    parser.add_argument('--checkpoint_dir', type=str, default="./pretrained_surrogate_results/debug")
+    parser.add_argument('--checkpoint_dir', type=str, default="/workspace/scaling-law-2025/pretrained_surrogate_results/def1030/seed1/")
+    parser.add_argument('--exp_name', type=str, default="val01")
 
     # hparams for data
     parser.add_argument('--cutoff', type=float, default=-1)
@@ -487,6 +389,7 @@ if __name__ == '__main__':
 
     # gpus
     parser.add_argument('--gpu_id', type=int, default=0)
+    parser.add_argument('--debug', action="store_true")
     args = parser.parse_args()
 
     data_dir = args.data_dir
@@ -496,7 +399,7 @@ if __name__ == '__main__':
     os.environ["WANDB_SILENT"] = "true"
     device = torch.device(f"cuda:{args.gpu_id}")
     torch.cuda.device(device)
-    save_dir = os.path.join(args.checkpoint_dir, f'cutoff{str(cutoff)}')
+    save_dir = os.path.join(args.checkpoint_dir, 'vis')
 
     # seed
     if args.seed is None:

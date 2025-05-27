@@ -192,3 +192,41 @@ def get_nano_data(dir, cutoff=-1):
         data.append((key, fv_xc, fv_yc, fv_xt, fv_yt))
 
     return data
+
+def get_colpret_data(dir, cutoff=-1):
+    if cutoff == -1:
+        cutoff = 0.5
+    else:
+        cutoff = 0.5 * cutoff
+
+    colpret_raw = np.load(f'{dir}/colpret.npz')
+    colpret_raw = dict(sorted(colpret_raw.items()))
+    data = []
+
+    for model, values in colpret_raw.items():
+        x = values[0] # the number of seen tokens
+        y = values[1] # losses
+        key = ('ColPreT', '-', model)
+        n_context = max(3, min(int(cutoff * len(x) + 0.5), len(x) - 1))
+        xc = torch.tensor(x[:n_context]).float()
+        yc = torch.tensor(y[:n_context]).float()
+        xt = torch.tensor(x[n_context:]).float()
+        yt = torch.tensor(y[n_context:]).float()
+        data.append((key, xc, yc, xt, yt))
+
+    return data
+
+if __name__ == '__main__':
+    IC_data, NMT_data, LM_data, BB_data = get_bench_data('/workspace/scaling-law-2025/data')
+    DD_data, DD_labels = get_DD_data('/workspace/scaling-law-2025/data')
+    nano_data = get_nano_data('/workspace/scaling-law-2025/data')
+    colpret_data = get_colpret_data('/workspace/scaling-law-2025/data')
+
+    # check the data
+    print(f'IC_data[0]: {IC_data[0]}')
+    print(f'NMT_data[0]: {NMT_data[0]}')
+    print(f'LM_data[0]: {LM_data[0]}')
+    print(f'BB_data[0]: {BB_data[0]}')
+    print(f'DD_data[0]: {DD_data[0]}')
+    print(f'nano_data[0]: {nano_data[0]}')
+    print(f'colpret_data[0]: {colpret_data[0]}')
