@@ -474,7 +474,7 @@ if __name__ == '__main__':
 
     # dir
     parser.add_argument('--data_dir', type=str, default="./data")
-    parser.add_argument('--checkpoint_dir', type=str, default="./pretrained_surrogate_results/debug")
+    parser.add_argument('--checkpoint_dir', type=str, default="./pretrained_surrogate_results/default")
 
     # hparams for data
     parser.add_argument('--cutoff', type=float, default=-1)
